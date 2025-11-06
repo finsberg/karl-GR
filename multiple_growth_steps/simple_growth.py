@@ -122,15 +122,6 @@ def plot_line(r_i, line_history, line_points, analytical_solutions=None):
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-''' INITIAL CONDITIONS '''
-#region
-# Define parameters for analytical solutions
-R_o = 2.0  # Outer radius
-R_i = 1.0  # Inner radius in reference configuration (same as geo inner_radius)
-g_1 = 1.6
-g_2 = 1.2
-c = -0.05  # Constant equal to Neumann boundary condition (0.05)
-#endregion
 
 ''' DEFINE FUNCTION SPACES AND TRIAL FUNCTIONS '''
 #region
@@ -181,6 +172,16 @@ stress_nn = dolfinx.fem.Function(scalar_growth_space, name="stress_nn")
 J = dolfinx.fem.Function(scalar_growth_space, name="J")
 u_mag = dolfinx.fem.Function(scalar_growth_space, name="displacement_magnitude")
 
+#endregion
+
+''' INITIAL CONDITIONS '''
+#region
+# Define parameters for analytical solutions
+R_o = 2.0  # Outer radius
+R_i = 1.0  # Inner radius in reference configuration (same as geo inner_radius)
+g_1 = dolfinx.fem.Constant(geo.mesh, dolfinx.default_scalar_type(1.6))  # Growth in fiber direction
+g_2 = dolfinx.fem.Constant(geo.mesh, dolfinx.default_scalar_type(1.2))  # Growth in cross-fiber direction
+c = -0.05  # Constant equal to Neumann boundary condition (0.05)
 #endregion
 
 ''' KINEMATICS '''
