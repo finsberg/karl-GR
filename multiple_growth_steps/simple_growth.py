@@ -23,9 +23,11 @@ output_dir = Path(
 )  # Specify the folder where all the data should be saved
 output_dir.mkdir(parents=True, exist_ok=True)  # Make the folder if it doesn't exist
 
+''' CREATE GEOMETRY '''
+#region
 geo = load_cylinder_geometry(
     comm,
-    char_length=0.1,
+    char_length=0.125,
     height=0.5,
     inner_radius=1,
     outer_radius=2,
@@ -40,8 +42,9 @@ tol = 0.0
 line_points = np.array(
     [[r * np.cos(0), r * np.sin(0), z] for r in np.linspace(geo.r_range[0], geo.r_range[1], 16)],
 )
+#endregion
 
-
+''' PLOTTING '''
 def plot_line(r_i, line_history, line_points, analytical_solutions=None):
     """Plot current values of all variables along the line defined by line_points.
 
@@ -119,15 +122,18 @@ def plot_line(r_i, line_history, line_points, analytical_solutions=None):
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-
+''' INITIAL CONDITIONS '''
+#region
 # Define parameters for analytical solutions
 R_o = 2.0  # Outer radius
 R_i = 1.0  # Inner radius in reference configuration (same as geo inner_radius)
 g_1 = 1.6
 g_2 = 1.2
 c = -0.05  # Constant equal to Neumann boundary condition (0.05)
+#endregion
 
-
+''' DEFINE FUNCTION SPACES AND TRIAL FUNCTIONS '''
+#region
 QUAD_DEGREE = 8  # The number of points used in the quadrature scheme.
 
 # Create a second order Lagrange function space for displacement
@@ -160,24 +166,32 @@ p = dolfinx.fem.Function(p_space, name="p")
 q = ufl.TestFunction(p_space)
 dp = ufl.TrialFunction(p_space)
 
-# Derivative of the displacement field
+scalar_element = basix.ufl.element(
+    family="DG",
+    cell=str(geo.mesh.ufl_cell()),
+    degree=5,
+    shape=(),
+    discontinuous=True,
+)
+scalar_growth_space = dolfinx.fem.functionspace(geo.mesh, scalar_element)
+
+stress_ff = dolfinx.fem.Function(scalar_growth_space, name="stress_ff")
+stress_tt = dolfinx.fem.Function(scalar_growth_space, name="stress_tt")
+stress_nn = dolfinx.fem.Function(scalar_growth_space, name="stress_nn")
+J = dolfinx.fem.Function(scalar_growth_space, name="J")
+u_mag = dolfinx.fem.Function(scalar_growth_space, name="displacement_magnitude")
+
+#endregion
+
+''' KINEMATICS '''
+#region
 F = ufl.variable(ufl.Identity(3) + ufl.grad(u))
-
-# A = ufl.variable(F)# * ufl.inv(G)
-# Isotropic deformation
 G = g_1 * ufl.outer(geo.n, geo.n) + g_2 * ufl.outer(geo.f, geo.f) + ufl.outer(geo.s, geo.s)
+A = ufl.variable(F * ufl.inv(G))
+#endregion
 
-A = F * ufl.inv(G)
-
-A = ufl.variable(A)  # Deformation gradient tensor
-
-mu = 1.0  # Shear modulus
-C = A.T * A  # Right Cauchy-Green deformation tensor
-I1 = ufl.tr(C)  # First invariant of the right Cauchy-Green tensor
-psi = (mu / 2) * (I1 - 3)  # Neo-Hookean strain energy function # / 2.0
-stress = ufl.diff(psi, F)
-# P = stress
-
+''' BOUNDARY CONDITIONS '''
+#region
 N = ufl.FacetNormal(geo.mesh)  # Normal vector on the boundary of the mesh
 
 ds = ufl.Measure(
@@ -216,10 +230,40 @@ bc_top = dolfinx.fem.dirichletbc(0.0, top_dofs, u_space.sub(2))
 bcs = [bc_bottom, bc_top]
 
 dx = ufl.dx(metadata={"quadrature_degree": QUAD_DEGREE})
-# elasticity_term = ufl.inner(P, ufl.grad(v)) * dx
-# elasticity_term = ufl.derivative(psi * dx, u, v)
+#endregion
+
+''' MATERIAL MODEL '''
+#region
+mu = 1.0  # Shear modulus
+C = A.T * A  # Right Cauchy-Green deformation tensor
+I1 = ufl.tr(C)  # First invariant of the right Cauchy-Green tensor
+psi = (mu / 2) * (I1 - 3)  # Neo-Hookean strain energy function # / 2.0
+stress = ufl.diff(psi, F)
+#endregion
+
+''' WEAK FORMULATION AND SOLVER '''
+#region
 pressure_term = p * (ufl.det(A) - 1) * dx
 elasticity_term = ufl.inner(stress, ufl.grad(v)) * dx
+cauchy = stress + p * ufl.inv(F.T)
+# stress = stress + p * ufl.inv(A).T * ufl.det(A)   # PK1 stress
+stress_ff_expr = dolfinx.fem.Expression(  # hoop stress
+    ufl.inner(cauchy * geo.f, geo.f),
+    scalar_growth_space.element.interpolation_points(),
+)
+stress_tt_expr = dolfinx.fem.Expression(
+    ufl.inner(cauchy * geo.s, geo.s),
+    scalar_growth_space.element.interpolation_points(),
+)
+stress_nn_expr = dolfinx.fem.Expression(
+    ufl.inner(cauchy * geo.n, geo.n),
+    scalar_growth_space.element.interpolation_points(),
+)
+J_expr = dolfinx.fem.Expression(ufl.det(A), scalar_growth_space.element.interpolation_points())
+u_mag_expr = dolfinx.fem.Expression(
+    ufl.sqrt(ufl.dot(u, u)),
+    scalar_growth_space.element.interpolation_points(),
+)
 
 F0 = (
     elasticity_term + ufl.derivative(pressure_term, u, v) + neumann + robin
@@ -229,7 +273,6 @@ F1 = ufl.derivative(psi * dx, p, q) + ufl.derivative(
     p,
     q,
 )
-
 
 R = [F0, F1]  # , F2]
 dR = [
@@ -256,6 +299,7 @@ solver = scifem.NewtonSolver(
     max_iterations=25,
     petsc_options=petsc_options,
 )
+#endregion
 
 solver.solve()
 
@@ -267,42 +311,6 @@ with dolfinx.io.VTXWriter(
 ) as writer:
     writer.write(0.0)
 
-# Plot in adios the stress and displacement
-scalar_element = basix.ufl.element(
-    family="DG",
-    cell=str(geo.mesh.ufl_cell()),
-    degree=5,
-    shape=(),
-    discontinuous=True,
-)
-scalar_growth_space = dolfinx.fem.functionspace(geo.mesh, scalar_element)
-
-stress_ff = dolfinx.fem.Function(scalar_growth_space, name="stress_ff")
-stress_tt = dolfinx.fem.Function(scalar_growth_space, name="stress_tt")
-stress_nn = dolfinx.fem.Function(scalar_growth_space, name="stress_nn")
-J = dolfinx.fem.Function(scalar_growth_space, name="J")
-u_mag = dolfinx.fem.Function(scalar_growth_space, name="displacement_magnitude")
-
-stress = stress + p * ufl.inv(F.T)  # * G.T / ufl.det(G)
-# stress = stress + p * ufl.inv(A).T * ufl.det(A)   # PK1 stress
-stress_ff_expr = dolfinx.fem.Expression(  # hoop stress
-    ufl.inner(stress * geo.f, geo.f),
-    scalar_growth_space.element.interpolation_points(),
-)
-stress_tt_expr = dolfinx.fem.Expression(
-    ufl.inner(stress * geo.s, geo.s),
-    scalar_growth_space.element.interpolation_points(),
-)
-stress_nn_expr = dolfinx.fem.Expression(
-    ufl.inner(stress * geo.n, geo.n),
-    scalar_growth_space.element.interpolation_points(),
-)
-J_expr = dolfinx.fem.Expression(ufl.det(F), scalar_growth_space.element.interpolation_points())
-u_mag_expr = dolfinx.fem.Expression(
-    ufl.sqrt(ufl.dot(u, u)),
-    scalar_growth_space.element.interpolation_points(),
-)
-
 stress_ff.interpolate(stress_ff_expr)
 stress_tt.interpolate(stress_tt_expr)
 stress_nn.interpolate(stress_nn_expr)
@@ -313,7 +321,6 @@ functions: dict[str, dolfinx.fem.Function] = {}
 history: dict[str, list[float]] = {}
 line_data: dict[str, dolfinx.fem.Function] = {}
 line_history: dict[str, list[np.ndarray]] = {}
-
 
 def register_function(name: str, function: dolfinx.fem.Function):
     function.name = name
