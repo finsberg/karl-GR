@@ -372,10 +372,15 @@ stress_nn_expr = dolfinx.fem.Expression(
 
 J_expr = dolfinx.fem.Expression(ufl.det(A), scalar_space.element.interpolation_points())
 
-g2_expr = dolfinx.fem.Expression(g_2 * (dt * (stress_ff - set_point) / set_point + 1), scalar_space.element.interpolation_points())
+g2_expr = dolfinx.fem.Expression(
+    g_2 * (dt * (stress_ff - set_point) / set_point + 1),
+    scalar_space.element.interpolation_points(),
+)
 
 F0 = (
-    elasticity_term + ufl.derivative(pressure_term, u, v) + inner_neumann + outer_robin
+    elasticity_term
+    + ufl.derivative(pressure_term, u, v)
+    + inner_neumann  # + outer_robin
 )  #  ufl.derivative(rigid_form, u, v) +ufl.derivative(psi * dx, u, v)
 
 F1 = ufl.derivative(psi * dx, p, q) + ufl.derivative(
@@ -395,6 +400,11 @@ petsc_options = {
     "pc_type": "lu",  # LU preconditioner
     "pc_factor_mat_solver_type": "mumps",  # paralellization
     "ksp_monitor": None,  # see output during solve
+    "mat_mumps_icntl_24": 1,  # Zero pivot detection
+    "mat_mumps_icntl_25": 0,  # Which nullspace to extract
+    "mat_mumps_icntl_4": 1,  # Verbosity
+    "mat_mumps_icntl_2": 1,  # std out blaaah
+    "mat_mumps_cntl_3": 1e-6,  # Threshold factor
 }
 solver = scifem.NewtonSolver(
     R,
