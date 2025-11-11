@@ -7,6 +7,8 @@ import numpy as np
 from collections import defaultdict
 from pathlib import Path
 import scifem
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 
 # 1. Initialize MPI communicator
 comm = MPI.COMM_WORLD
@@ -28,11 +30,106 @@ mesh, cell_tags, facet_tags = gmshio.read_from_msh(
     filename, comm, rank=0, gdim=2
 )
 
+''' PLOTTING '''
+def plot_line(r_i, line_history, line_points, time, analytical_solutions=None):
+    """Plot current values of all variables along the line defined by line_points.
+
+    Args:
+        analytical_solutions: Dict with variable names as keys and analytical functions as values.
+                             Each function should take line_points as input and return values.
+    """
+
+    # Get all variable names from line history
+    variables = list(line_history.keys())
+    num_vars = len(variables)
+
+    # Determine indices for 10 evenly spaced time points
+    if variables:
+        num_time_steps = len(line_history[variables[0]])
+        num_plots = min(20, num_time_steps)  # Don't try to plot more than available
+        if num_plots > 0:
+            indices_to_plot = np.linspace(0, num_time_steps - 1, num_plots, dtype=int)
+        else:
+            indices_to_plot = []
+    else:
+        indices_to_plot = []
+
+    # Calculate grid dimensions - always use 1 column
+    ncols = 1
+    nrows = num_vars  # Each variable gets its own row
+
+    # Evenly spaced grid from 0 to 1 in length on line_poin
+    distances = line_points[:, 0]
+
+    # Create subplots grid
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3 * nrows), sharex=True)
+
+    # Handle case where there's only one variable
+    if num_vars == 1:
+        axes = [axes]
+    else:
+        axes = axes.reshape(-1)  # Flatten to 1D array for single column
+
+    for idx, var_name in enumerate(variables):
+        ax = axes[idx]
+        ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
+        ax.ticklabel_format(style="plain", axis="y")
+
+        # Plot numerical solution
+        if len(line_history[var_name]) > 0:
+            for t_idx in indices_to_plot:
+                time_step_values = line_history[var_name][t_idx]
+                color = plt.cm.viridis(t_idx / max(1, len(line_history[var_name]) - 1))
+                timestamp = time[t_idx] if t_idx < len(time) else t_idx
+
+                # Only add labels for the first subplot to avoid duplicate legend entries
+                label = f"t = {timestamp:.3f}" if idx == 0 else None
+
+                ax.plot(
+                    distances,
+                    time_step_values,
+                    color=color,
+                    linestyle="-",
+                    linewidth=1.5,
+                    alpha=0.7,
+                    label=label,
+                )
+
+        # Plot analytical solution if provided
+        if analytical_solutions and var_name in analytical_solutions:
+            print("var_name", var_name)
+            analytical_values = analytical_solutions[var_name](line_points, r_i)
+            ax.plot(
+                distances,
+                analytical_values,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                alpha=0.8,
+                label="Analytical",
+            )
+
+        ax.set_ylabel(var_name)
+        ax.set_title(f"{var_name} (t = {time[-1]:.3f})")
+        ax.grid(True, alpha=0.3)
+    
+
+    # Set x-label for bottom plot
+    axes[-1].set_xlabel("Distance along line")
+    fig.legend(fontsize="small", loc="center right")
+
+    plt.tight_layout()
+    fig.subplots_adjust(right=0.85)
+
+    output_path = output_dir / "variables_line_spatial.png"
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
 ''' CREATE FIBERS '''
 P_fiber = basix.ufl.element(
     family="CG",  # Type of functions (Lagrange polynomials)
     cell=str(mesh.ufl_cell()),  # Type of cell (e.g., triangle, square, etc.)
-    degree=2,  # Polynomial degree of functions #TODO find out why this only works for degree 1
+    degree=1,  # Polynomial degree of functions
     shape=(mesh.geometry.dim,),  # Dimension of functions (2D vector in this case)
 )
 
@@ -43,18 +140,20 @@ r = np.sqrt(x**2 + y**2)
 e_r = np.array([x / r, y / r])
 e_theta = np.array([-e_r[1], e_r[0]])  # 90 degree rotation of e_r
 
-line_points = np.array([[r * np.cos(theta), r * np.sin(theta)]
-                        for r in np.linspace(1.0, 2.0, 10)
-                        for theta in np.linspace(0, 2 * np.pi, 36)], dtype=np.float64)
+
+# points on a radial line from inner to outer radius
+line_points = np.array([[r * np.cos(0), r * np.sin(0)]
+                        for r in np.linspace(1.0, 2.0, 50)], dtype=np.float64)
+
+# line_points = np.array([[r * np.cos(0), r * np.sin(0)]
+#                         for r in np.linspace(1.0, 2.0, 10)
+#                         for theta in np.linspace(0, 2 * np.pi, 36)], dtype=np.float64)
 
 f0 = dolfinx.fem.Function(fiber_space, name="f0")
 r0 = dolfinx.fem.Function(fiber_space, name="r0")
 
 f0.x.array[:] = np.array(e_theta).T.reshape(-1)
 r0.x.array[:] = np.array(e_r).T.reshape(-1)
-
-breakpoint()
-
 
 ''' BOUNDARY CONDITONS '''
 import numpy as np
@@ -136,7 +235,6 @@ scalar_element = basix.ufl.element(
 scalar_space = dolfinx.fem.functionspace(mesh, scalar_element)
 
 stress_ff = dolfinx.fem.Function(scalar_space, name="stress_ff")
-stress_tt = dolfinx.fem.Function(scalar_space, name="stress_tt")
 stress_nn = dolfinx.fem.Function(scalar_space, name="stress_nn")
 J = dolfinx.fem.Function(scalar_space, name="J")
 u_mag = dolfinx.fem.Function(scalar_space, name="displacement_magnitude")
@@ -146,14 +244,12 @@ g_2 = dolfinx.fem.Function(scalar_space, name="g_2")
 # REGISTER FUNCTIONS FOR DATA STORAGE
 register_function("u", u)  # saves values for displacement
 register_function("p", p)  # saves values for pressure
-register_function("stress_ff", stress_ff)  # saves values for stress
-register_function("stress_tt", stress_tt)  # saves values for stress
-register_function("stress_nn", stress_nn)  # saves values for stress
+register_function("Hoop Stress", stress_ff)  # saves values for stress
+register_function("Radial Stress", stress_nn)  # saves values for stress
 
-register_line_data("stress_ff", stress_ff)
-register_line_data("stress_nn", stress_nn)
-register_line_data("stress_tt", stress_tt)
-register_line_data("g2", g_2)
+register_line_data("Hoop Stress", stress_ff)
+register_line_data("Radial Stress", stress_nn)
+register_line_data("Cumulative Hoop Growth", g_2)
 register_line_data("p", p)
 # register_line_data("displacement_magnitude", u_mag)
 
@@ -193,7 +289,7 @@ for funcs in sorted_functions.values():
 # Define parameters for analytical solutions
 R_o = 2.0  # Outer radius
 R_i = 1.0  # Inner radius in reference configuration (same as geo inner_radius)
-g_2.x.array[:] = 1.1
+g_2.x.array[:] = 1.0
 c = -0.05  # Constant equal to Neumann boundary condition (0.05)
 dt = 0.025  # Time step size
 set_point = 0.5  # Set point for growth
@@ -237,13 +333,14 @@ ds = ufl.Measure(
 traction = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(-c))
 # Pressure value on the inside of the cylinder
 # Neumann boundary condition on the inside surface (pulling back the surface element)
-neumann = ufl.inner(v, traction * ufl.det(F) * ufl.inv(F).T * N) * ds(20)
+inner_neumann = ufl.inner(v, traction * ufl.det(F) * ufl.inv(F).T * N) * ds(20)
 
 # Robin on the outside
 N = ufl.FacetNormal(mesh)
-spring = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.00001))
+spring = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.0001))
 robin_value = ufl.inner(spring * u, N)
-robin = ufl.inner(robin_value * v, ufl.det(F) * ufl.inv(F).T * N) * ds(10)
+outer_robin = ufl.inner(robin_value * v, ufl.det(F) * ufl.inv(F).T * N) * ds(10)
+
 
 dx = ufl.dx(metadata={"quadrature_degree": QUAD_DEGREE})
 #endregion
@@ -263,10 +360,22 @@ pressure_term = p * (ufl.det(A) - 1) * dx
 elasticity_term = ufl.inner(stress, ufl.grad(v)) * dx
 cauchy = (stress + p * ufl.inv(F.T)) * F.T / ufl.det(F)  # This is cauchy stress because stress = dPsi/dF * dF / dG = dPsi/dF * inv(G)
 
+stress_ff_expr = dolfinx.fem.Expression(  # hoop stress
+    ufl.inner(cauchy * f0, f0),
+    scalar_space.element.interpolation_points(),
+)
+
+stress_nn_expr = dolfinx.fem.Expression(
+    ufl.inner(cauchy * r0, r0),
+    scalar_space.element.interpolation_points(),
+)
+
 J_expr = dolfinx.fem.Expression(ufl.det(A), scalar_space.element.interpolation_points())
 
+g2_expr = dolfinx.fem.Expression(g_2 * (dt * (stress_ff - set_point) / set_point + 1), scalar_space.element.interpolation_points())
+
 F0 = (
-    elasticity_term + ufl.derivative(pressure_term, u, v) + neumann + robin
+    elasticity_term + ufl.derivative(pressure_term, u, v) + inner_neumann + outer_robin
 )  #  ufl.derivative(rigid_form, u, v) +ufl.derivative(psi * dx, u, v)
 
 F1 = ufl.derivative(psi * dx, p, q) + ufl.derivative(
@@ -296,11 +405,36 @@ solver = scifem.NewtonSolver(
     petsc_options=petsc_options,
 )
 
-solver.solve()
+n = 10 #2**9
+for i in range(n):
 
-# for name, function in line_data.items():
-#     values = scifem.evaluate_function(function, line_points)
-#     line_history[name].append(values)
+    print(f"Starting growth step {i} of {n}")
 
-for writer in writers:
-    writer.write(1)
+    solver.solve()
+
+    stress_ff.interpolate(stress_ff_expr)
+    stress_nn.interpolate(stress_nn_expr)
+    J.interpolate(J_expr)
+    # u_mag.interpolate(u_mag_expr)
+
+    g_2.interpolate(g2_expr)
+    
+    for name, function in line_data.items():
+        values = scifem.evaluate_function(function, line_points)
+        line_history[name].append(values)
+
+    for writer in writers:
+        writer.write(i)
+    
+
+time = [dt * i for i in range(n)]
+
+# print inner radius of deformation configuration, use u to get the current inner radius
+new_geo_inner = scifem.evaluate_function(u, np.array([line_points[0]]))
+new_geo_outer = scifem.evaluate_function(u, np.array([line_points[-1]]))
+inner_rad = R_i + np.sqrt(new_geo_inner[0, 0] ** 2 + new_geo_inner[0, 1] ** 2)
+outer_rad = R_o + np.sqrt(new_geo_outer[-1, 0] ** 2 + new_geo_outer[-1, 1] ** 2)
+print(f"Inner radius in deformation configuration: {inner_rad}")
+print(f"Outer radius in deformation configuration: {outer_rad}")
+# print(f"Outer radius in deformation configuration: {outer_radius:.3f}")
+plot_line(r_i=1.19, line_history=line_history, time=time, line_points=line_points)
